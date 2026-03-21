@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import tempfile
 import uuid
@@ -7,6 +8,8 @@ from datetime import datetime, timezone
 from langchain_core.tools import tool
 
 logger = logging.getLogger("agent_interview_prep.tools.note_generator")
+
+_BASE_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 
 
 def _slugify(text: str) -> str:
@@ -127,7 +130,7 @@ async def generate_study_notes(title: str, content: str, format: str = "markdown
             f"Study notes generated successfully!\n\n"
             f"**Title:** {title}\n"
             f"**Format:** {format.upper()}\n"
-            f"**Download:** [Download: {title}](/download/{file_id})"
+            f"**Download:** [Download: {title}]({_BASE_URL}/download/{file_id})"
         )
 
     except Exception as e:
