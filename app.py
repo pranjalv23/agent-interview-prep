@@ -149,9 +149,13 @@ async def ask_stream(request: AskRequest):
         queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
 
         async def _stream_producer():
-            async for chunk in stream:
-                await queue.put(("chunk", chunk))
-            await queue.put(("done", None))
+            try:
+                async for chunk in stream:
+                    await queue.put(("chunk", chunk))
+                await queue.put(("done", None))
+            except Exception as exc:
+                logger.error("Stream producer failed: %s", exc)
+                await queue.put(("error", str(exc)))
 
         async def _keepalive_producer():
             while True:
@@ -169,6 +173,10 @@ async def ask_stream(request: AskRequest):
                     yield f"data: {json.dumps({'text': data})}\n\n"
                 elif kind == "keepalive":
                     yield ": keep-alive\n\n"
+                elif kind == "error":
+                    error_msg = "An error occurred processing your request. Please try again or switch to a different model."
+                    yield f"data: {json.dumps({'text': error_msg})}\n\n"
+                    break
                 elif kind == "done":
                     break
         finally:
