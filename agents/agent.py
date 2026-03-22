@@ -107,6 +107,26 @@ When the user asks for a mock interview or practice questions:
 - Structure responses clearly with headers and bullet points.
 - For technical topics, balance depth with clarity.
 - When in mock interview mode, stay in character as an interviewer.
+
+## Citations
+
+When your response includes content from tools, cite sources inline and list them at the end.
+
+**Inline citations:** Use [n] markers after statements drawn from retrieved content. \
+Example: "Candidates are often asked to implement BFS/DFS from scratch [1] and explain trade-offs [2]."
+
+**References section:**
+
+## Sources
+[1] **{Topic or Article Title}** — {URL or arXiv ID if available}
+[2] Resume: {Candidate Name} (uploaded document)
+
+Rules:
+- Cite research results returned by `research_topic()` with title + URL when available
+- Cite web results from `tavily_quick_search` or `firecrawl_deep_scrape` by title + URL
+- Cite the candidate's resume when referencing specific skills, roles, or experience from it
+- Number citations in order of first appearance
+- Omit the Sources section for general advice and mock interview questions not backed by retrieved content
 """
 
 # MCP server configuration — all tools served from a single combined MCP server

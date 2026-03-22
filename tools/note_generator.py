@@ -12,6 +12,40 @@ logger = logging.getLogger("agent_interview_prep.tools.note_generator")
 _BASE_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 
 
+_UNICODE_TO_ASCII = str.maketrans({
+    # Greek letters (lowercase)
+    "α": "alpha", "β": "beta",  "γ": "gamma", "δ": "delta",
+    "ε": "epsilon","ζ": "zeta", "η": "eta",   "θ": "theta",
+    "λ": "lambda", "μ": "mu",   "ξ": "xi",   "π": "pi",
+    "σ": "sigma",  "τ": "tau",  "φ": "phi",  "χ": "chi",
+    "ψ": "psi",    "ω": "omega",
+    # Greek letters (uppercase)
+    "Γ": "Gamma", "Δ": "Delta", "Θ": "Theta", "Λ": "Lambda",
+    "Σ": "Sigma",  "Φ": "Phi",  "Ψ": "Psi",  "Ω": "Omega",
+    # Math operators / symbols
+    "∑": "sum",   "∏": "prod",  "∫": "integral",
+    "∈": "in",    "∉": "not in","⊂": "subset","⊆": "subset=",
+    "∪": "union", "∩": "intersect",
+    "≤": "<=",    "≥": ">=",   "≠": "!=",
+    "→": "->",    "←": "<-",   "↔": "<->",
+    "∞": "inf",   "∂": "d",    "∇": "nabla",
+    "⊤": "^T",    "⊥": "perp",
+    "·": ".",
+})
+
+
+def _strip_latex_math(text: str) -> str:
+    """Remove LaTeX $$...$$ and $...$ delimiters, keeping the inner expression."""
+    text = re.sub(r'\$\$(.*?)\$\$', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\$(.*?)\$', r'\1', text)
+    return text
+
+
+def _sanitize_for_pdf(text: str) -> str:
+    """Transliterate Unicode math symbols to ASCII equivalents for Helvetica compatibility."""
+    return text.translate(_UNICODE_TO_ASCII)
+
+
 def _slugify(text: str) -> str:
     """Convert text to a URL-friendly slug."""
     text = text.lower().strip()
@@ -38,6 +72,11 @@ def _generate_toc(content: str) -> str:
 def _create_pdf_bytes(title: str, markdown_content: str) -> bytes:
     """Generate a PDF from markdown content using fpdf2. Returns bytes."""
     from fpdf import FPDF
+
+    # Preprocess: strip LaTeX math delimiters and transliterate Unicode
+    # symbols to ASCII so Helvetica can render them without errors.
+    markdown_content = _sanitize_for_pdf(_strip_latex_math(markdown_content))
+    title = _sanitize_for_pdf(title)
 
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -135,4 +174,9 @@ async def generate_study_notes(title: str, content: str, format: str = "markdown
 
     except Exception as e:
         logger.error("Failed to generate study notes: %s", e)
-        return f"Error generating study notes: {e}"
+        return (
+            f"Error generating study notes ({format}): {e}. "
+            "Do NOT retry with the same format. "
+            "If format was 'pdf', call this tool again with format='markdown' instead — "
+            "markdown supports all Unicode and math notation without restrictions."
+        )
