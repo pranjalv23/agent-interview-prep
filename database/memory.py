@@ -33,7 +33,11 @@ def get_memories(user_id: str, query: str) -> list[str]:
             filters={"user_id": user_id},
             limit=5,
         )
-        memories = [r["memory"][:300] for r in results.get("results", []) if r.get("memory")]
+        memories = [
+            r["memory"][:300]
+            for r in results.get("results", [])
+            if r.get("memory") and r.get("score", 0) >= 0.70
+        ]
         if memories:
             logger.info("Retrieved %d memories for user='%s'", len(memories), user_id)
         else:
