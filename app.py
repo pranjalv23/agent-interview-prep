@@ -170,8 +170,8 @@ async def ask(request: AskRequest, http_request: Request):
 
 @app.post("/ask/stream")
 async def ask_stream(request: AskRequest, http_request: Request):
-    user_id = http_request.headers.get("X-User-Id") or None
     """Stream the agent's response as Server-Sent Events (SSE)."""
+    user_id = http_request.headers.get("X-User-Id") or None
     session_id = request.session_id or MongoDB.generate_session_id()
     logger.info("POST /ask/stream — session='%s', user='%s', query='%s'",
                 session_id, user_id or "anonymous", request.query[:100])
@@ -181,76 +181,82 @@ async def ask_stream(request: AskRequest, http_request: Request):
     )
     enriched_query = dynamic_context + request.query
     agent = create_agent()
-    _uid_token = _current_user_id.set(user_id)
+    
     stream = agent.astream(
         enriched_query, session_id=session_id,
         system_prompt=SYSTEM_PROMPT, model_id=request.model_id
     )
 
     async def event_stream():
-        full_response = []
-        queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
-
-        async def _stream_producer():
-            try:
-                async for chunk in stream:
-                    await queue.put(("chunk", chunk))
-                await queue.put(("done", None))
-            except Exception as exc:
-                logger.error("Stream producer failed: %s", exc)
-                await queue.put(("error", str(exc)))
-
-        async def _keepalive_producer():
-            while True:
-                await asyncio.sleep(15)
-                await queue.put(("keepalive", None))
-
-        producer_task = asyncio.create_task(_stream_producer())
-        keepalive_task = asyncio.create_task(_keepalive_producer())
-
+        # Set the token INSIDE the streaming context generator
+        _uid_token = _current_user_id.set(user_id)
+        
         try:
-            while True:
-                kind, data = await queue.get()
-                if kind == "chunk":
-                    full_response.append(data)
-                    yield f"data: {json.dumps({'text': data})}\n\n"
-                elif kind == "keepalive":
-                    yield ": keep-alive\n\n"
-                elif kind == "error":
-                    error_msg = "An error occurred processing your request. Please try again or switch to a different model."
-                    yield f"data: {json.dumps({'text': error_msg})}\n\n"
-                    break
-                elif kind == "done":
-                    break
-        finally:
-            keepalive_task.cancel()
+            full_response = []
+            queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+
+            async def _stream_producer():
+                try:
+                    async for chunk in stream:
+                        await queue.put(("chunk", chunk))
+                    await queue.put(("done", None))
+                except Exception as exc:
+                    logger.error("Stream producer failed: %s", exc)
+                    await queue.put(("error", str(exc)))
+
+            async def _keepalive_producer():
+                while True:
+                    await asyncio.sleep(15)
+                    await queue.put(("keepalive", None))
+
+            producer_task = asyncio.create_task(_stream_producer())
+            keepalive_task = asyncio.create_task(_keepalive_producer())
+
             try:
-                await keepalive_task
-            except asyncio.CancelledError:
-                pass
-            await producer_task
+                while True:
+                    kind, data = await queue.get()
+                    if kind == "chunk":
+                        full_response.append(data)
+                        yield f"data: {json.dumps({'text': data})}\n\n"
+                    elif kind == "keepalive":
+                        yield ": keep-alive\n\n"
+                    elif kind == "error":
+                        error_msg = "An error occurred processing your request. Please try again or switch to a different model."
+                        yield f"data: {json.dumps({'text': error_msg})}\n\n"
+                        break
+                    elif kind == "done":
+                        break
+            finally:
+                keepalive_task.cancel()
+                try:
+                    await keepalive_task
+                except asyncio.CancelledError:
+                    pass
+                await producer_task
 
-        response_text = "".join(full_response)
+            response_text = "".join(full_response)
 
-        if not response_text.strip():
-            fallback = "Sorry, the model returned an empty response. Please try again or switch to a different model."
-            yield f"data: {json.dumps({'text': fallback})}\n\n"
-            response_text = fallback
+            if not response_text.strip():
+                fallback = "Sorry, the model returned an empty response. Please try again or switch to a different model."
+                yield f"data: {json.dumps({'text': fallback})}\n\n"
+                response_text = fallback
 
-        save_memory(user_id=user_id or session_id, query=request.query, response=response_text)
+            save_memory(user_id=user_id or session_id, query=request.query, response=response_text)
 
-        await MongoDB.save_conversation(
-            session_id=session_id,
-            query=request.query,
-            response=response_text,
-            steps=stream.steps if hasattr(stream, 'steps') else [],
-            user_id=user_id,
-        )
+            await MongoDB.save_conversation(
+                session_id=session_id,
+                query=request.query,
+                response=response_text,
+                steps=stream.steps if hasattr(stream, 'steps') else [],
+                user_id=user_id,
+            )
 
-        _current_user_id.reset(_uid_token)
-
-        yield f"data: {json.dumps({'session_id': session_id})}\n\n"
-        yield "data: [DONE]\n\n"
+            yield f"data: {json.dumps({'session_id': session_id})}\n\n"
+            yield "data: [DONE]\n\n"
+            
+        finally:
+            # Safely reset the token within the correct context block
+            _current_user_id.reset(_uid_token)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
