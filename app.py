@@ -241,20 +241,23 @@ async def ask_stream(request: AskRequest, http_request: Request):
                 yield f"data: {json.dumps({'text': fallback})}\n\n"
                 response_text = fallback
 
-            save_memory(user_id=user_id or session_id, query=request.query, response=response_text)
+            try:
+                save_memory(user_id=user_id or session_id, query=request.query, response=response_text)
 
-            await MongoDB.save_conversation(
-                session_id=session_id,
-                query=request.query,
-                response=response_text,
-                steps=stream.steps if hasattr(stream, 'steps') else [],
-                user_id=user_id,
-            )
+                await MongoDB.save_conversation(
+                    session_id=session_id,
+                    query=request.query,
+                    response=response_text,
+                    steps=stream.steps if hasattr(stream, 'steps') else [],
+                    user_id=user_id,
+                )
+            except Exception as e:
+                logger.error("Failed to save memory/conversation: %s", e)
 
             yield f"data: {json.dumps({'session_id': session_id})}\n\n"
-            yield "data: [DONE]\n\n"
             
         finally:
+            yield "data: [DONE]\n\n"
             # Safely reset the token within the correct context block
             _current_user_id.reset(_uid_token)
 
