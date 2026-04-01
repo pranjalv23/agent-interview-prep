@@ -170,6 +170,7 @@ def _get_checkpointer() -> AsyncMongoDBSaver:
         _checkpointer = AsyncMongoDBSaver.from_conn_string(
             conn_string=os.getenv("MONGO_URI", "mongodb://localhost:27017"),
             db_name=os.getenv("MONGO_DB_NAME", "agent_interview_prep"),
+            ttl=int(os.getenv("CHECKPOINT_TTL_SECONDS", str(7 * 24 * 3600))),
         )
     return _checkpointer
 

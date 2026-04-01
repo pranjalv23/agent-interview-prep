@@ -6,6 +6,7 @@ import re
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
@@ -19,7 +20,7 @@ from agents.agent import create_agent, run_query, _build_dynamic_context, SYSTEM
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 from tools.resume_parser import parse_resume_file
-from tools.research_client import _current_user_id
+from tools.research_client import _current_user_id, _current_request_id
 
 def _fix_math_delimiters(text: str) -> str:
     r"""Convert LaTeX parenthesis delimiters to Markdown math notation.
@@ -101,11 +102,22 @@ class StreamingMathFixer:
         return self._source.steps
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+class _JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        doc = {
+            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info:
+            doc["exc"] = self.formatException(record.exc_info)
+        return json.dumps(doc, ensure_ascii=False)
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_JsonFormatter())
+logging.root.setLevel(logging.INFO)
+logging.root.addHandler(_handler)
 logger = logging.getLogger("agent_interview_prep.api")
 limiter = Limiter(key_func=get_remote_address)
 
@@ -194,9 +206,15 @@ async def ask(body: AskRequest, request: Request):
     logger.info("POST /ask — session='%s' (%s), user='%s', query='%s'",
                 session_id, "new" if is_new else "existing", user_id or "anonymous", body.query[:100])
 
-    result = await run_query(body.query, session_id=session_id,
-                             response_format=body.response_format, model_id=body.model_id,
-                             user_id=user_id)
+    _uid_token = _current_user_id.set(user_id)
+    _rid_token = _current_request_id.set(request.headers.get("X-Request-ID"))
+    try:
+        result = await run_query(body.query, session_id=session_id,
+                                 response_format=body.response_format, model_id=body.model_id,
+                                 user_id=user_id)
+    finally:
+        _current_user_id.reset(_uid_token)
+        _current_request_id.reset(_rid_token)
     response = _fix_math_delimiters(result["response"])
     steps = result["steps"]
 
@@ -239,10 +257,12 @@ async def ask_stream(body: AskRequest, request: Request):
         system_prompt=SYSTEM_PROMPT, model_id=request.model_id
     ))
 
+    _incoming_request_id = request.headers.get("X-Request-ID")
     async def event_stream():
-        # Set the token INSIDE the streaming context generator
+        # Set the tokens INSIDE the streaming context generator
         _uid_token = _current_user_id.set(user_id)
-        
+        _rid_token = _current_request_id.set(_incoming_request_id)
+
         try:
             full_response = []
             queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
@@ -310,8 +330,9 @@ async def ask_stream(body: AskRequest, request: Request):
             
         finally:
             yield "data: [DONE]\n\n"
-            # Safely reset the token within the correct context block
+            # Safely reset the tokens within the correct context block
             _current_user_id.reset(_uid_token)
+            _current_request_id.reset(_rid_token)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
