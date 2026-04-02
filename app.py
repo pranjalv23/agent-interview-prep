@@ -116,7 +116,7 @@ class _JsonFormatter(logging.Formatter):
 
 _handler = logging.StreamHandler()
 _handler.setFormatter(_JsonFormatter())
-logging.root.setLevel(logging.INFO)
+logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
 logging.root.addHandler(_handler)
 logger = logging.getLogger("agent_interview_prep.api")
 limiter = Limiter(key_func=get_remote_address)
@@ -133,6 +133,7 @@ async def lifespan(app: FastAPI):
     agent = create_agent()
     await agent._ensure_initialized()
     logger.info("MCP servers connected, agent ready")
+    await MongoDB.ensure_indexes()
     yield
     await agent._disconnect_mcp()
     await MongoDB.close()
