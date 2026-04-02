@@ -45,6 +45,10 @@ class MongoDB:
         return cls._db()["resumes"]
 
     @classmethod
+    def _codebases(cls):
+        return cls._db()["codebases"]
+
+    @classmethod
     def generate_session_id(cls) -> str:
         return uuid.uuid4().hex
 
@@ -125,6 +129,45 @@ class MongoDB:
             {"_id": 0},
         )
 
+    # ── Codebase persistence ──
+
+    @classmethod
+    async def store_codebase(cls, session_id: str, codebase_doc: dict) -> None:
+        """Store a fetched GitHub repo codebase for the session. Upserts — one codebase per session."""
+        doc = {
+            "session_id": session_id,
+            "repo_url": codebase_doc.get("repo_url"),
+            "repo_name": codebase_doc.get("repo_name"),
+            "owner": codebase_doc.get("owner"),
+            "language": codebase_doc.get("language"),
+            "description": codebase_doc.get("description"),
+            "file_tree": codebase_doc.get("file_tree", []),
+            "key_files": codebase_doc.get("key_files", []),
+            "summary": codebase_doc.get("summary", ""),
+            "total_files": codebase_doc.get("total_files", 0),
+            "created_at": datetime.now(timezone.utc),
+        }
+        await cls._codebases().update_one(
+            {"session_id": session_id},
+            {"$set": doc},
+            upsert=True,
+        )
+        logger.info(
+            "Stored codebase for session='%s', repo='%s/%s', files=%d",
+            session_id,
+            codebase_doc.get("owner"),
+            codebase_doc.get("repo_name"),
+            codebase_doc.get("total_files", 0),
+        )
+
+    @classmethod
+    async def get_codebase(cls, session_id: str) -> dict | None:
+        """Retrieve the stored codebase document for a session."""
+        return await cls._codebases().find_one(
+            {"session_id": session_id},
+            {"_id": 0},
+        )
+
     # ── File storage (GridFS for Railway persistence) ──
 
     @classmethod
@@ -187,6 +230,7 @@ class MongoDB:
         db = cls._db()
         await db["conversations"].create_index("created_at", expireAfterSeconds=7_776_000)
         await db["resumes"].create_index("created_at", expireAfterSeconds=7_776_000)
+        await db["codebases"].create_index("created_at", expireAfterSeconds=7_776_000)
         await db["files"].create_index("created_at", expireAfterSeconds=2_592_000)
         await db["fs.files"].create_index("uploadDate", expireAfterSeconds=2_592_000)
         logger.info("MongoDB TTL indexes ensured")

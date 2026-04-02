@@ -38,6 +38,16 @@ INTERVIEW_PREP_AGENT_CARD = AgentCard(
             description="Conduct practice interview sessions with feedback on answers.",
             tags=["mock", "interview", "practice", "feedback"],
         ),
+        AgentSkill(
+            id="codebase-interview",
+            name="Codebase Interview",
+            description=(
+                "Grill developers on their own codebase. Share a GitHub repo URL and the agent "
+                "asks pointed questions about design decisions, edge cases, architecture, and code "
+                "quality — one question at a time, like a real technical interviewer."
+            ),
+            tags=["codebase", "code-review", "github", "technical-interview", "design-decisions"],
+        ),
     ],
     defaultInputModes=["text"],
     defaultOutputModes=["text"],

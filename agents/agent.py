@@ -9,6 +9,7 @@ from database.mongo import MongoDB
 from tools.resume_parser import parse_resume
 from tools.research_client import research_topic, _current_user_id
 from tools.note_generator import generate_study_notes
+from tools.codebase_parser import analyze_codebase
 
 logger = logging.getLogger("agent_interview_prep.agent")
 
@@ -40,6 +41,10 @@ study notes. You compose the content (markdown), choose a title, and pick the fo
 company-specific preparation guides, job descriptions, and industry trends.
 - `firecrawl_deep_scrape(url: str)` — Deep scrape a URL for full content. Use for job \
 posting analysis or company research pages.
+
+- `analyze_codebase(session_id: str)` — Retrieve the GitHub repository uploaded by the \
+user for this session. Returns repo metadata, file tree, and key file contents. \
+Call this ONCE at the start of Codebase Interview Mode to load the repo.
 
 **Important:** Only use the tools listed above. Ignore any other tools that may be \
 available (paper-related, finance-related, vector DB tools) — they are not relevant \
@@ -101,12 +106,39 @@ When the user asks for a mock interview or practice questions:
 5. Keep a running score mentally and provide a summary when the user wants to stop
 6. Suggest follow-up questions that probe deeper into weak areas
 
+### Codebase Interview Mode:
+When a codebase is available in context (shown under [CODEBASE]) or when the user \
+asks you to interview them on their codebase:
+1. Call `analyze_codebase(session_id)` ONCE to load the full repo content
+2. Ask the user what role they are interviewing for and what level (junior/mid/senior) — \
+   skip if they already told you
+3. Study the codebase silently — do NOT summarize it; ask questions instead
+4. Ask ONE pointed technical question at a time, referencing specific files and functions \
+   by name (e.g. "In `app.py`, line 45, your `process_request` function..."). \
+   Never ask vague generic questions like "explain your architecture" without tying it to actual code.
+5. Rotate through these question types — vary them to keep the session challenging:
+   - **Design decision**: "Why did you choose X over Y in `{file}:{function}`?"
+   - **Edge case**: "What happens if `{condition}` occurs in `{module}.{function}`?"
+   - **Data flow**: "Walk me through how `{feature}` flows from `{entry_point}` to `{storage}`"
+   - **Scalability**: "What would break in `{component}` at 10x current load? How would you fix it?"
+   - **Code review**: "I see a potential issue around `{file}:{lines}` — can you spot it and explain the fix?"
+   - **Trade-offs**: "You used `{pattern}` in `{file}`. What are the trade-offs vs `{alternative}`?"
+6. After each answer, give honest feedback: Was the answer correct/deep enough? \
+   What would an interviewer at FAANG or a senior IC think? What was missing?
+7. Escalate difficulty based on answer quality — if they answer well, probe deeper; \
+   if they struggle, shift to a related but simpler question first
+8. Track a running mental score (0-10 per question) and provide a final grilling summary \
+   when the user says "stop", "done", or "end session"
+9. NEVER invent files or functions not present in the actual codebase loaded by `analyze_codebase`
+
 ## Response Style
 - Be encouraging but honest. Point out gaps constructively.
 - Use concrete examples from the user's resume when applicable.
 - Structure responses clearly with headers and bullet points.
 - For technical topics, balance depth with clarity.
 - When in mock interview mode, stay in character as an interviewer.
+- When in codebase interview mode, stay laser-focused on the actual code — \
+  every question must reference a real file/function from the fetched codebase.
 
 ## Citations
 
@@ -180,7 +212,7 @@ def create_agent() -> BaseAgent:
     if _agent_instance is None:
         logger.info("Creating interview prep agent (singleton) with MCP servers")
         _agent_instance = BaseAgent(
-            tools=[parse_resume, research_topic, generate_study_notes],
+            tools=[parse_resume, research_topic, generate_study_notes, analyze_codebase],
             mcp_servers=MCP_SERVERS,
             system_prompt=SYSTEM_PROMPT,
             checkpointer=_get_checkpointer(),
@@ -223,6 +255,18 @@ async def _build_dynamic_context(session_id: str, query: str, response_format: s
             f"{resume_doc['parsed_text']}"
         )
         logger.info("Injected resume into context for session='%s'", session_id)
+
+    codebase_doc = await MongoDB.get_codebase(session_id)
+    if codebase_doc:
+        parts.append(
+            f"[CODEBASE]\n"
+            f"Repository: {codebase_doc.get('owner', '?')}/{codebase_doc.get('repo_name', '?')}\n"
+            f"URL: {codebase_doc.get('repo_url', '?')}\n"
+            f"Language: {codebase_doc.get('language', 'unknown')}\n"
+            f"A codebase is available. Call analyze_codebase(session_id) to load the full repo content.\n"
+            f"[/CODEBASE]"
+        )
+        logger.info("Injected codebase hint into context for session='%s'", session_id)
 
     format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
     if format_instruction:

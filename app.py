@@ -195,6 +195,14 @@ class FileListItem(BaseModel):
     created_at: str | None = None
 
 
+class CodebaseUploadResponse(BaseModel):
+    repo_name: str
+    owner: str
+    total_files: int
+    language: str
+    preview: str
+
+
 # ── Standard agent endpoints ──
 
 @app.post("/ask", response_model=AskResponse)
@@ -466,6 +474,52 @@ async def list_files(session_id: str):
         )
         for f in files
     ]
+
+
+@app.post("/upload/codebase", response_model=CodebaseUploadResponse)
+@limiter.limit("10/minute")
+async def upload_codebase(
+    github_url: str = Form(...),
+    session_id: str = Form(...),
+    request: Request = None,
+):
+    """Fetch a public GitHub repository and store it for codebase interview mode."""
+    github_url = github_url.strip()
+    if not github_url:
+        raise HTTPException(status_code=400, detail="github_url is required.")
+
+    logger.info("POST /upload/codebase — session='%s', url='%s'", session_id, github_url)
+
+    try:
+        agent = create_agent()
+        await agent._ensure_initialized()
+        fetch_tool = agent.tools_by_name.get("fetch_github_repo")
+        if fetch_tool is None:
+            raise HTTPException(status_code=503, detail="fetch_github_repo tool not available on MCP server")
+        raw = await fetch_tool.ainvoke({"repo_url": github_url})
+        if isinstance(raw, str) and raw.startswith("Error:"):
+            raise ValueError(raw[len("Error:"):].strip())
+        codebase_doc = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Unexpected error fetching GitHub repo '%s': %s", github_url, e)
+        raise HTTPException(status_code=500, detail="Failed to fetch repository. Please check the URL and try again.")
+
+    await MongoDB.store_codebase(session_id=session_id, codebase_doc=codebase_doc)
+
+    preview_lines = codebase_doc["summary"].splitlines()[:6]
+    preview = "\n".join(preview_lines)
+
+    return CodebaseUploadResponse(
+        repo_name=codebase_doc["repo_name"],
+        owner=codebase_doc["owner"],
+        total_files=codebase_doc["total_files"],
+        language=codebase_doc["language"],
+        preview=preview,
+    )
 
 
 @app.get("/health")
