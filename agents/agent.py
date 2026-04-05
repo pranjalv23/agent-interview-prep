@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 from agent_sdk.agents import BaseAgent
@@ -195,6 +196,17 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
     "detailed": "",
 }
 
+def _fix_flash_card_format(text: str) -> str:
+    """Post-process flash card responses to enforce consistent ### heading format."""
+    text = re.sub(r'^## (?!#)', '### ', text, flags=re.MULTILINE)
+    text = re.sub(r'^#### ', '### ', text, flags=re.MULTILINE)
+    first_card = re.search(r'^### ', text, re.MULTILINE)
+    if first_card:
+        text = text[first_card.start():]
+    card_count = len(re.findall(r'^### ', text, re.MULTILINE))
+    if card_count < 3:
+        logger.warning("Flash card response has only %d cards", card_count)
+    return text
 
 def _get_checkpointer() -> AsyncMongoDBSaver:
     global _checkpointer
@@ -307,6 +319,9 @@ async def run_query(query: str, session_id: str = "default",
         result = await agent.arun(enriched_query, session_id=session_id, system_prompt=system_prompt, model_id=model_id)
     finally:
         _current_user_id.reset(token)
+
+    if response_format == "flash_cards":
+        result["response"] = _fix_flash_card_format(result["response"])
 
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
