@@ -16,7 +16,7 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from agents.agent import create_agent, run_query, _build_dynamic_context, SYSTEM_PROMPT, save_memory
+from agents.agent import create_agent, run_query, _build_dynamic_context, _build_system_prompt, SYSTEM_PROMPT, save_memory
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 from tools.resume_parser import parse_resume_file
@@ -273,11 +273,12 @@ async def ask_stream(body: AskRequest, request: Request):
         session_id, body.query, response_format=body.response_format, user_id=user_id
     )
     enriched_query = dynamic_context + body.query
+    system_prompt = _build_system_prompt(body.response_format)
     agent = create_agent()
     
     stream = StreamingMathFixer(agent.astream(
         enriched_query, session_id=session_id,
-        system_prompt=SYSTEM_PROMPT, model_id=body.model_id
+        system_prompt=system_prompt, model_id=body.model_id
     ))
 
     _incoming_request_id = request.headers.get("X-Request-ID")
@@ -563,7 +564,7 @@ async def health():
 
     try:
         # Check MongoDB connectivity
-        await MongoDB.db.command("ping")
+        await MongoDB.get_client().admin.command("ping")
     except Exception as e:
         logger.error("Health check: MongoDB connection failed: %s", e)
         checks["mongodb"] = "error"

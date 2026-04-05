@@ -226,9 +226,27 @@ _TRIVIAL_FOLLOWUPS: frozenset[str] = frozenset({
 })
 
 
+def _build_system_prompt(response_format: str | None = None) -> str:
+    """Build the system prompt with optional response format override appended.
+
+    Placing the format override in the system prompt (rather than the user
+    message) gives it maximum authority — the LLM treats system instructions
+    as the highest priority, so the format is reliably followed even when
+    the conversation is long or the user message contains distracting context.
+    """
+    fmt = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
+    if fmt:
+        return SYSTEM_PROMPT + "\n" + fmt
+    return SYSTEM_PROMPT
+
+
 async def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
                                   user_id: str | None = None) -> str:
-    """Build dynamic context block (date, memories, resume, format instructions) to prepend to the user query."""
+    """Build dynamic context block (date, memories, resume, codebase) to prepend to the user query.
+
+    Note: response_format is accepted for signature compatibility but format
+    instructions are now injected via _build_system_prompt() instead.
+    """
     mem_key = user_id or session_id
     # Skip Mem0 search for trivial follow-ups — "Yes" has no semantic content to match against.
     if query.strip().lower() not in _TRIVIAL_FOLLOWUPS and len(query.strip()) > 10:
@@ -268,10 +286,6 @@ async def _build_dynamic_context(session_id: str, query: str, response_format: s
         )
         logger.info("Injected codebase hint into context for session='%s'", session_id)
 
-    format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
-    if format_instruction:
-        parts.append(format_instruction.strip())
-
     context_block = "\n\n".join(parts)
     return f"[CONTEXT]\n{context_block}\n[/CONTEXT]\n\n"
 
@@ -279,16 +293,18 @@ async def _build_dynamic_context(session_id: str, query: str, response_format: s
 async def run_query(query: str, session_id: str = "default",
                     response_format: str | None = None, model_id: str | None = None,
                     user_id: str | None = None) -> dict:
-    logger.info("run_query called — session='%s', user='%s', query='%s', model='%s'",
-                session_id, user_id or "anonymous", query[:100], model_id or "default")
+    logger.info("run_query called — session='%s', user='%s', query='%s', model='%s', format='%s'",
+                session_id, user_id or "anonymous", query[:100], model_id or "default",
+                response_format or "detailed")
 
     dynamic_context = await _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
     enriched_query = dynamic_context + query
+    system_prompt = _build_system_prompt(response_format)
 
     agent = create_agent()
     token = _current_user_id.set(user_id)
     try:
-        result = await agent.arun(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
+        result = await agent.arun(enriched_query, session_id=session_id, system_prompt=system_prompt, model_id=model_id)
     finally:
         _current_user_id.reset(token)
 
