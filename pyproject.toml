@@ -31,7 +31,7 @@ dependencies = [
 package-mode = false
 
 [tool.poetry.dependencies]
-agent-sdk = { git = "https://github.com/agent-hub-org/agent-sdk.git", tag = "v0.1.57" }
+agent-sdk = { git = "https://github.com/agent-hub-org/agent-sdk.git", tag = "v0.1.59" }
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
