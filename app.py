@@ -170,7 +170,7 @@ app.add_middleware(CORSMiddleware, allow_origins=_allowed_origins, allow_credent
 
 @app.middleware("http")
 async def verify_internal_key(request: Request, call_next):
-    if request.url.path not in ["/health", "/docs", "/openapi.json"]:
+    if request.url.path not in ["/health", "/docs", "/openapi.json", "/a2a/.well-known/agent.json"]:
         expected = os.getenv("INTERNAL_API_KEY")
         if expected and request.headers.get("X-Internal-API-Key") != expected:
             return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Unauthorized internal access"})
