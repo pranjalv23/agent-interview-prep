@@ -8,11 +8,11 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status, Depends
 from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
@@ -58,10 +58,16 @@ class StreamingMathFixer:
                     bi = buffer.find("\\[")
                     ii = buffer.find("\\(")
                     if bi == -1 and ii == -1:
-                        if len(buffer) > 1:
-                            result += buffer[:-1]
-                            buffer = buffer[-1:]
-                        break
+                        # Only buffer if the chunk ends with a backslash that might start a delimiter
+                        if buffer.endswith("\\"):
+                            if len(buffer) > 1:
+                                result += buffer[:-1]
+                                buffer = "\\"
+                            break
+                        else:
+                            result += buffer
+                            buffer = ""
+                            break
                     if bi == -1 or (ii != -1 and ii < bi):
                         result += buffer[:ii]
                         buffer = buffer[ii + 2:]
@@ -139,6 +145,14 @@ async def lifespan(app: FastAPI):
     await MongoDB.close()
     logger.info("Shutdown complete")
 
+
+async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> Response:
+    """Custom handler for RateLimitExceeded to return a JSON response."""
+    return Response(
+        content=json.dumps({"detail": "Rate limit exceeded. Please try again later."}),
+        status_code=429,
+        media_type="application/json",
+    )
 
 app = FastAPI(
     title="Interview Prep Agent API",
@@ -263,7 +277,7 @@ async def ask_stream(body: AskRequest, request: Request):
     
     stream = StreamingMathFixer(agent.astream(
         enriched_query, session_id=session_id,
-        system_prompt=SYSTEM_PROMPT, model_id=request.model_id
+        system_prompt=SYSTEM_PROMPT, model_id=body.model_id
     ))
 
     _incoming_request_id = request.headers.get("X-Request-ID")
@@ -297,8 +311,12 @@ async def ask_stream(body: AskRequest, request: Request):
                 while True:
                     kind, data = await queue.get()
                     if kind == "chunk":
-                        full_response.append(data)
-                        yield f"data: {json.dumps({'text': data})}\n\n"
+                        if isinstance(data, str) and data.startswith("__PROGRESS__:"):
+                            phase_label = data[len("__PROGRESS__:"):]
+                            yield f"event: progress\ndata: {json.dumps({'phase': phase_label})}\n\n"
+                        else:
+                            full_response.append(data)
+                            yield f"data: {json.dumps({'text': data})}\n\n"
                     elif kind == "keepalive":
                         yield ": keep-alive\n\n"
                     elif kind == "error":
@@ -367,73 +385,83 @@ async def get_history(session_id: str):
 # ── File upload/download endpoints ──
 
 @app.post("/upload/resume", response_model=UploadResponse)
+@limiter.limit("10/minute")
 async def upload_resume(
+    request: Request,
     file: UploadFile = File(...),
     session_id: str = Form(...),
 ):
     """Upload a resume file (PDF or DOCX) for analysis."""
-    # Validate file type
-    ext = os.path.splitext(file.filename or "")[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type '{ext}'. Only PDF and DOCX files are accepted.",
-        )
-
-    file_id = uuid.uuid4().hex
-    file_bytes = await file.read()
-
-    logger.info("Received resume upload — session='%s', file_id='%s', size=%d bytes",
-                session_id, file_id, len(file_bytes))
-
-    # Write to a temp file for parsing (pymupdf/python-docx need a file path)
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
+    user_id = request.headers.get("X-User-Id") or None
+    _uid_token = _current_user_id.set(user_id)
+    _rid_token = _current_request_id.set(request.headers.get("X-Request-ID"))
 
     try:
-        parsed = parse_resume_file(tmp_path)
-    except Exception as e:
-        logger.error("Failed to parse uploaded resume: %s", e)
-        raise HTTPException(status_code=422, detail=f"Failed to parse resume: {e}")
+        # Validate file type
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{ext}'. Only PDF and DOCX files are accepted.",
+            )
+
+        file_id = uuid.uuid4().hex
+        file_bytes = await file.read()
+
+        logger.info("Received resume upload — session='%s', user='%s', file_id='%s', size=%d bytes",
+                    session_id, user_id or "anonymous", file_id, len(file_bytes))
+
+        # Write to a temp file for parsing (pymupdf/python-docx need a file path)
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+
+        try:
+            parsed = parse_resume_file(tmp_path)
+        except Exception as e:
+            logger.error("Failed to parse uploaded resume: %s", e)
+            raise HTTPException(status_code=422, detail=f"Failed to parse resume: {e}")
+        finally:
+            os.unlink(tmp_path)
+
+        # Build a readable parsed text for storage
+        parsed_parts = []
+        if parsed["detected_skills"]:
+            parsed_parts.append(f"Detected Skills: {', '.join(parsed['detected_skills'])}")
+        for section_name, content_text in parsed["sections"].items():
+            if section_name != "other":
+                parsed_parts.append(f"[{section_name.title()}]\n{content_text}")
+        if "other" in parsed["sections"]:
+            parsed_parts.append(f"[Additional]\n{parsed['sections']['other']}")
+
+        parsed_text = "\n\n".join(parsed_parts)
+
+        # Store file bytes in GridFS and metadata in MongoDB
+        await MongoDB.store_file(
+            file_id=file_id,
+            filename=file.filename or f"resume{ext}",
+            data=file_bytes,
+            file_type="resume",
+            session_id=session_id,
+        )
+        await MongoDB.save_resume(
+            session_id=session_id,
+            file_id=file_id,
+            filename=file.filename or f"resume{ext}",
+            parsed_text=parsed_text,
+        )
+
+        # Preview: first 500 chars
+        preview = parsed_text[:500] + ("..." if len(parsed_text) > 500 else "")
+
+        return UploadResponse(
+            file_id=file_id,
+            filename=file.filename or f"resume{ext}",
+            parsed_preview=preview,
+        )
     finally:
-        os.unlink(tmp_path)
-
-    # Build a readable parsed text for storage
-    parsed_parts = []
-    if parsed["detected_skills"]:
-        parsed_parts.append(f"Detected Skills: {', '.join(parsed['detected_skills'])}")
-    for section_name, content_text in parsed["sections"].items():
-        if section_name != "other":
-            parsed_parts.append(f"[{section_name.title()}]\n{content_text}")
-    if "other" in parsed["sections"]:
-        parsed_parts.append(f"[Additional]\n{parsed['sections']['other']}")
-
-    parsed_text = "\n\n".join(parsed_parts)
-
-    # Store file bytes in GridFS and metadata in MongoDB
-    await MongoDB.store_file(
-        file_id=file_id,
-        filename=file.filename or f"resume{ext}",
-        data=file_bytes,
-        file_type="resume",
-        session_id=session_id,
-    )
-    await MongoDB.save_resume(
-        session_id=session_id,
-        file_id=file_id,
-        filename=file.filename or f"resume{ext}",
-        parsed_text=parsed_text,
-    )
-
-    # Preview: first 500 chars
-    preview = parsed_text[:500] + ("..." if len(parsed_text) > 500 else "")
-
-    return UploadResponse(
-        file_id=file_id,
-        filename=file.filename or f"resume{ext}",
-        parsed_preview=preview,
-    )
+        _current_user_id.reset(_uid_token)
+        _current_request_id.reset(_rid_token)
 
 
 @app.get("/download/{file_id}")
@@ -470,7 +498,7 @@ async def list_files(session_id: str):
             file_id=f["file_id"],
             filename=f["filename"],
             file_type=f["file_type"],
-            created_at=f.get("created_at", "").isoformat() if f.get("created_at") else None,
+            created_at=f.get("created_at").isoformat() if isinstance(f.get("created_at"), datetime) else (f.get("created_at") if f.get("created_at") else None),
         )
         for f in files
     ]
@@ -479,9 +507,9 @@ async def list_files(session_id: str):
 @app.post("/upload/codebase", response_model=CodebaseUploadResponse)
 @limiter.limit("10/minute")
 async def upload_codebase(
+    request: Request,
     github_url: str = Form(...),
     session_id: str = Form(...),
-    request: Request = None,
 ):
     """Fetch a public GitHub repository and store it for codebase interview mode."""
     github_url = github_url.strip()
@@ -524,7 +552,29 @@ async def upload_codebase(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "agent-interview-prep"}
+    """Service health check with dependency verification."""
+    status_code = 200
+    checks = {
+        "status": "ok",
+        "mongodb": "ok",
+        "mem0": "ok" if os.getenv("MEM0_API_KEY") else "unconfigured",
+        "service": "agent-interview-prep",
+    }
+
+    try:
+        # Check MongoDB connectivity
+        await MongoDB.db.command("ping")
+    except Exception as e:
+        logger.error("Health check: MongoDB connection failed: %s", e)
+        checks["mongodb"] = "error"
+        checks["status"] = "degraded"
+        status_code = 503
+
+    return Response(
+        content=json.dumps(checks),
+        status_code=status_code,
+        media_type="application/json",
+    )
 
 
 if __name__ == "__main__":
