@@ -1,21 +1,15 @@
 import asyncio
 import logging
 import os
-from contextvars import ContextVar
 
 import httpx
 from langchain_core.tools import tool
 
+from agent_sdk.context import user_id_var as _current_user_id, request_id_var as _current_request_id
+
 logger = logging.getLogger("agent_interview_prep.tools.research_client")
 
 RESEARCH_AGENT_URL = os.getenv("RESEARCH_AGENT_URL", "http://localhost:9002")
-
-# Propagates the authenticated user_id through the async call stack so the
-# research agent can log and store memories under the correct user.
-_current_user_id: ContextVar[str | None] = ContextVar("_current_user_id", default=None)
-
-# Propagates the incoming request correlation ID through to the delegated call.
-_current_request_id: ContextVar[str | None] = ContextVar("_current_request_id", default=None)
 
 _STUDY_NOTES_CONTEXT = (
     "\n\n[RESEARCH CONTEXT: This query is for generating comprehensive study notes. "

@@ -2,11 +2,9 @@ import asyncio
 import json
 import logging
 import os
-import re
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status, Depends
 from fastapi.responses import Response, StreamingResponse, JSONResponse
@@ -16,114 +14,17 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from agent_sdk.logging import configure_logging
+from agent_sdk.context import request_id_var, user_id_var
+from agent_sdk.metrics import metrics_response
+from agent_sdk.server.streaming import StreamingMathFixer, _fix_math_delimiters
 from agents.agent import create_agent, run_query, create_stream, save_memory, _fix_flash_card_format
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 from tools.resume_parser import parse_resume_file
 from tools.research_client import _current_user_id, _current_request_id
 
-def _fix_math_delimiters(text: str) -> str:
-    r"""Convert LaTeX parenthesis delimiters to Markdown math notation.
-
-    \[...\]  →  $$...$$   (display math — must run before inline to avoid overlap)
-    \(...\)  →  $...$     (inline math)
-    """
-    text = re.sub(r'\\\[(.*?)\\\]', lambda m: f'$$\n{m.group(1)}\n$$', text, flags=re.DOTALL)
-    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text)
-    return text
-
-
-class StreamingMathFixer:
-    """Wraps an async chunk stream and converts \\(...\\) / \\[...\\] math delimiters on-the-fly.
-
-    Non-math text is yielded immediately so the streaming feel is preserved.
-    Math sections are buffered only until their closing delimiter arrives,
-    then emitted with the correct $...$ / $$...$$ notation.
-    """
-
-    def __init__(self, source):
-        self._source = source
-
-    async def __aiter__(self):
-        buffer = ""
-        in_math = False   # inside \( ... \)
-        in_block = False  # inside \[ ... \]
-
-        async for chunk in self._source:
-            buffer += chunk
-            result = ""
-
-            while buffer:
-                if not in_math and not in_block:
-                    bi = buffer.find("\\[")
-                    ii = buffer.find("\\(")
-                    if bi == -1 and ii == -1:
-                        # Only buffer if the chunk ends with a backslash that might start a delimiter
-                        if buffer.endswith("\\"):
-                            if len(buffer) > 1:
-                                result += buffer[:-1]
-                                buffer = "\\"
-                            break
-                        else:
-                            result += buffer
-                            buffer = ""
-                            break
-                    if bi == -1 or (ii != -1 and ii < bi):
-                        result += buffer[:ii]
-                        buffer = buffer[ii + 2:]
-                        in_math = True
-                    else:
-                        result += buffer[:bi]
-                        buffer = buffer[bi + 2:]
-                        in_block = True
-                elif in_math:
-                    close = buffer.find("\\)")
-                    if close == -1:
-                        break
-                    result += "$" + buffer[:close] + "$"
-                    buffer = buffer[close + 2:]
-                    in_math = False
-                else:  # in_block
-                    close = buffer.find("\\]")
-                    if close == -1:
-                        break
-                    result += "$$\n" + buffer[:close] + "\n$$"
-                    buffer = buffer[close + 2:]
-                    in_block = False
-
-            if result:
-                yield result
-
-        # Flush any remaining buffer after the source stream ends
-        if buffer:
-            if in_math:
-                yield "$" + buffer + "$"
-            elif in_block:
-                yield "$$\n" + buffer + "\n$$"
-            else:
-                yield buffer
-
-    @property
-    def steps(self):
-        return self._source.steps
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        doc = {
-            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-        }
-        if record.exc_info:
-            doc["exc"] = self.formatException(record.exc_info)
-        return json.dumps(doc, ensure_ascii=False)
-
-_handler = logging.StreamHandler()
-_handler.setFormatter(_JsonFormatter())
-logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
-logging.root.addHandler(_handler)
+configure_logging("agent_interview_prep")
 logger = logging.getLogger("agent_interview_prep.api")
 limiter = Limiter(key_func=get_remote_address)
 
@@ -166,11 +67,30 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=_allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Internal-API-Key", "X-User-Id", "X-Request-ID"],
+)
+
+_PUBLIC_PATHS = {"/health", "/metrics", "/docs", "/openapi.json", "/a2a/.well-known/agent.json"}
+
+@app.middleware("http")
+async def inject_request_id(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    tok_r = request_id_var.set(request_id)
+    tok_u = user_id_var.set(request.headers.get("X-User-Id"))
+    response = await call_next(request)
+    request_id_var.reset(tok_r)
+    user_id_var.reset(tok_u)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 @app.middleware("http")
 async def verify_internal_key(request: Request, call_next):
-    if request.url.path not in ["/health", "/docs", "/openapi.json", "/a2a/.well-known/agent.json"]:
+    if request.url.path not in _PUBLIC_PATHS:
         expected = os.getenv("INTERNAL_API_KEY")
         if expected and request.headers.get("X-Internal-API-Key") != expected:
             return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Unauthorized internal access"})
@@ -278,14 +198,16 @@ async def ask_stream(body: AskRequest, request: Request):
     logger.info("POST /ask/stream — session='%s', user='%s', query='%s'",
                 session_id, user_id or "anonymous", body.query[:100])
 
-    stream = await create_stream(
+    raw_stream = await create_stream(
         body.query, session_id=session_id,
         response_format=body.response_format, model_id=body.model_id,
         user_id=user_id
     )
-    stream = StreamingMathFixer(stream)
+    stream = StreamingMathFixer(raw_stream)
 
+    _STREAM_TIMEOUT = float(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))
     _incoming_request_id = request.headers.get("X-Request-ID")
+
     async def event_stream():
         # Set the tokens INSIDE the streaming context generator
         _uid_token = _current_user_id.set(user_id)
@@ -297,9 +219,13 @@ async def ask_stream(body: AskRequest, request: Request):
 
             async def _stream_producer():
                 try:
-                    async for chunk in stream:
-                        await queue.put(("chunk", chunk))
+                    async with asyncio.timeout(_STREAM_TIMEOUT):
+                        async for chunk in stream:
+                            await queue.put(("chunk", chunk))
                     await queue.put(("done", None))
+                except TimeoutError:
+                    logger.error("Stream producer timed out after %.0fs", _STREAM_TIMEOUT)
+                    await queue.put(("error", f"Response timed out after {_STREAM_TIMEOUT:.0f}s."))
                 except Exception as exc:
                     logger.error("Stream producer failed: %s", exc)
                     await queue.put(("error", str(exc)))
@@ -355,7 +281,7 @@ async def ask_stream(body: AskRequest, request: Request):
                     session_id=session_id,
                     query=body.query,
                     response=response_text,
-                    steps=stream.steps if hasattr(stream, 'steps') else [],
+                    steps=raw_stream.steps if hasattr(raw_stream, 'steps') else [],
                     user_id=user_id,
                 )
             except Exception as e:
@@ -562,6 +488,12 @@ async def upload_codebase(
         language=codebase_doc["language"],
         preview=preview,
     )
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    content, content_type = metrics_response()
+    return Response(content=content, media_type=content_type)
 
 
 @app.get("/health")

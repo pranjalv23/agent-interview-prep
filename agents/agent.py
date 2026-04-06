@@ -197,17 +197,7 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
     "detailed": "",
 }
 
-def _fix_flash_card_format(text: str) -> str:
-    """Post-process flash card responses to enforce consistent ### heading format."""
-    text = re.sub(r'^## (?!#)', '### ', text, flags=re.MULTILINE)
-    text = re.sub(r'^#### ', '### ', text, flags=re.MULTILINE)
-    first_card = re.search(r'^### ', text, re.MULTILINE)
-    if first_card:
-        text = text[first_card.start():]
-    card_count = len(re.findall(r'^### ', text, re.MULTILINE))
-    if card_count < 3:
-        logger.warning("Flash card response has only %d cards", card_count)
-    return text
+from agent_sdk.agents.formatters import _fix_flash_card_format
 
 def _get_checkpointer() -> AsyncMongoDBSaver:
     global _checkpointer
