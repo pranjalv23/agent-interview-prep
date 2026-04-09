@@ -197,8 +197,6 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
     "detailed": "",
 }
 
-from agent_sdk.agents.formatters import _fix_flash_card_format
-
 def _get_checkpointer() -> AsyncMongoDBSaver:
     global _checkpointer
     if _checkpointer is None:
@@ -316,9 +314,6 @@ async def run_query(query: str, session_id: str = "default",
     finally:
         _current_user_id.reset(token)
 
-    if response_format == "flash_cards":
-        result["response"] = _fix_flash_card_format(result["response"])
-
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
     save_memory(user_id=user_id or session_id, query=query, response=result["response"])
@@ -334,17 +329,3 @@ async def create_stream(query: str, session_id: str = "default",
     system_prompt = _build_system_prompt(response_format)
     agent = create_agent()
     return agent.astream(enriched_query, session_id=session_id, system_prompt=system_prompt, model_id=model_id)
-
-
-def create_stream(query: str, session_id: str = "default",
-                  response_format: str | None = None, model_id: str | None = None):
-    """Create a StreamResult for the query. Returns the stream object directly.
-
-    Note: _build_dynamic_context is async; the caller (app.py) awaits it and calls agent.astream() directly.
-    """
-    logger.info("create_stream called — session='%s', query='%s', model='%s'",
-                session_id, query[:100], model_id or "default")
-
-    agent = create_agent()
-    # Dynamic context is built by the caller (app.py) which awaits _build_dynamic_context first.
-    return agent, session_id, response_format, model_id
