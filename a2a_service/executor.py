@@ -1,11 +1,11 @@
 import logging
 
-from agent_sdk.a2a.executor import BaseAgentExecutor
-from agents.agent import run_query
+from agent_sdk.a2a.executor import StreamingAgentExecutor
+from agents.agent import run_query, stream_for_a2a
 
 logger = logging.getLogger("agent_interview_prep.a2a_executor")
 
-class InterviewPrepAgentExecutor(BaseAgentExecutor):
-    """A2A executor that bridges incoming A2A tasks to the interview prep agent."""
+class InterviewPrepAgentExecutor(StreamingAgentExecutor):
+    """A2A executor that streams interview prep agent responses chunk-by-chunk."""
     def __init__(self):
-        super().__init__(run_query_fn=run_query)
+        super().__init__(run_query_fn=run_query, stream_fn=stream_for_a2a)

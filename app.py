@@ -192,6 +192,7 @@ async def ask(body: AskRequest, request: Request):
         response=response,
         steps=steps,
         user_id=user_id,
+        plan=result.get("plan"),
     )
 
     logger.info("POST /ask complete — session='%s', response length: %d chars, tool_calls: %d",
@@ -296,6 +297,7 @@ async def ask_stream(body: AskRequest, request: Request):
                     response=response_text,
                     steps=raw_stream.steps if hasattr(raw_stream, 'steps') else [],
                     user_id=user_id,
+                    plan=raw_stream.plan if hasattr(raw_stream, 'plan') else None,
                 )
             except Exception as e:
                 logger.error("Failed to save memory/conversation: %s", e)
