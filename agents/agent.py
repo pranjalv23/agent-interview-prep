@@ -72,6 +72,9 @@ to interview preparation.
 4. Use `tavily_quick_search` to find recent interview patterns for the target company
 
 ### When asked for study materials or notes:
+**NEVER ask the user to confirm scope or clarify before starting.** Make the most \
+reasonable interpretation of the topic and proceed immediately with the steps below.
+
 1. ALWAYS call `research_topic` first to gather deep technical content on the topic — \
 do not rely solely on your own knowledge for notes generation
 2. ALSO call `tavily_quick_search` to pull interview-specific tips, commonly asked \
