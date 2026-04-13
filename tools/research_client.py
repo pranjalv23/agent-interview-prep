@@ -39,6 +39,10 @@ async def research_topic(query: str) -> str:
         headers["X-User-Id"] = user_id
     if request_id:
         headers["X-Request-ID"] = request_id
+    
+    internal_key = os.getenv("INTERNAL_API_KEY")
+    if internal_key:
+        headers["X-Internal-API-Key"] = internal_key
 
     logger.info("Delegating research query to %s: '%s' (user='%s')",
                 RESEARCH_AGENT_URL, query[:100], user_id or "anonymous")
