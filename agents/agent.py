@@ -34,9 +34,11 @@ For study notes generation: ALWAYS call this tool first (see workflow below). \
 Call at most ONCE per user turn.
 
 **Note generation:**
-- `generate_study_notes(title: str, content: str, format: str)` — Generate downloadable \
-study notes. You compose the content (markdown), choose a title, and pick the format \
-("markdown" or "pdf"). The tool saves the file and returns a download link.
+- `generate_study_notes(title: str, content: str, format: str, source_file_id: str | None = None)` — Generate \
+downloadable study notes. If creating new notes, you compose the content (markdown), choose a title, \
+and pick the format ("markdown" or "pdf"). If the user asks for a different format of previously \
+generated notes, extract the file ID from the previous download link, pass it as `source_file_id`, \
+and leave `content` empty. The tool saves the file and returns a download link.
 
 **Web tools (via MCP):**
 - `tavily_quick_search(query: str, max_results: int)` — Web search for interview tips, \

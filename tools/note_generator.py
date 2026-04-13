@@ -123,24 +123,39 @@ def _create_pdf_bytes(title: str, markdown_content: str) -> bytes:
 
 
 @tool
-async def generate_study_notes(title: str, content: str, format: str = "markdown") -> str:
+async def generate_study_notes(title: str, content: str, format: str = "markdown", source_file_id: str | None = None) -> str:
     """Generate downloadable study notes from the provided content.
 
     Args:
         title: The title of the study notes (e.g., "System Design Interview Notes").
-        content: The full markdown content of the study notes. Include sections, key concepts,
-                 practice questions, and explanations.
+        content: The full markdown content of the study notes. Can be empty if source_file_id is provided.
         format: Output format - "markdown" or "pdf". Defaults to "markdown".
+        source_file_id: Optional ID of a previously generated markdown file to use as the source content.
     """
     from database.mongo import MongoDB
 
     file_id = uuid.uuid4().hex
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    slug = _slugify(title)
-
-    # Add TOC to markdown content
-    toc = _generate_toc(content)
-    full_content = f"# {title}\n\n## Table of Contents\n{toc}\n\n---\n\n{content}"
+    
+    if source_file_id:
+        result = await MongoDB.retrieve_file(source_file_id)
+        if not result:
+            return f"Error: source file {source_file_id} not found."
+        data, meta = result
+        try:
+            retrieved_content = data.decode("utf-8")
+        except Exception:
+            return f"Error: source file is not valid text/markdown."
+        title = title or "Study_Notes"
+        slug = _slugify(title)
+        full_content = retrieved_content
+        pdf_content = retrieved_content
+    else:
+        slug = _slugify(title)
+        # Add TOC to markdown content
+        toc = _generate_toc(content)
+        full_content = f"# {title}\n\n## Table of Contents\n{toc}\n\n---\n\n{content}"
+        pdf_content = content
 
     # Determine filename
     if format == "pdf":
@@ -150,7 +165,7 @@ async def generate_study_notes(title: str, content: str, format: str = "markdown
 
     try:
         if format == "pdf":
-            file_bytes = _create_pdf_bytes(title, content)
+            file_bytes = _create_pdf_bytes(title, pdf_content)
         else:
             file_bytes = full_content.encode("utf-8")
 
