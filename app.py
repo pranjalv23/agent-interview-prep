@@ -5,6 +5,8 @@ import os
 import re
 import tempfile
 import uuid
+import time
+import threading
 from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status, Depends
@@ -161,12 +163,30 @@ class CodebaseUploadResponse(BaseModel):
     language: str
     preview: str
 
-_codebase_locks = {}
+class LockCache:
+    def __init__(self, ttl: int = 3600):
+        self._locks = {}
+        self._timestamps = {}
+        self._ttl = ttl
+        self._mutex = threading.Lock()
+
+    def get_lock(self, session_id: str) -> asyncio.Lock:
+        with self._mutex:
+            now = time.time()
+            expired = [sid for sid, ts in self._timestamps.items() if now - ts > self._ttl]
+            for sid in expired:
+                if sid in self._locks and not self._locks[sid].locked():
+                    del self._locks[sid]
+                    del self._timestamps[sid]
+            if session_id not in self._locks:
+                self._locks[session_id] = asyncio.Lock()
+            self._timestamps[session_id] = now
+            return self._locks[session_id]
+
+_codebase_locks_cache = LockCache()
 
 def _get_codebase_lock(session_id: str) -> asyncio.Lock:
-    if session_id not in _codebase_locks:
-        _codebase_locks[session_id] = asyncio.Lock()
-    return _codebase_locks[session_id]
+    return _codebase_locks_cache.get_lock(session_id)
 
 
 # ── Standard agent endpoints ──
@@ -261,7 +281,7 @@ async def ask_stream(body: AskRequest, request: Request):
             try:
                 while True:
                     await asyncio.sleep(_HEARTBEAT_INTERVAL)
-                    await queue.put(f": heartbeat {int(asyncio.get_event_loop().time())}\n\n")
+                    await queue.put(f": heartbeat {int(asyncio.get_running_loop().time())}\n\n")
             except asyncio.CancelledError:
                 pass
 

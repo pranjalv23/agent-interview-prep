@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -65,7 +66,8 @@ async def record_attempt(
     col = _get_collection()
     now = datetime.now(timezone.utc)
 
-    existing = await col.find_one({"user_id": user_id, "question_hash": hash(question) % (2**31)})
+    stable_hash = int(hashlib.sha256(question.encode()).hexdigest(), 16) % (2**31)
+    existing = await col.find_one({"user_id": user_id, "question_hash": stable_hash})
 
     easiness = existing.get("easiness_factor", 2.5) if existing else 2.5
     interval = existing.get("interval_days", 1) if existing else 1
@@ -77,7 +79,7 @@ async def record_attempt(
     doc = {
         "user_id": user_id,
         "session_id": session_id,
-        "question_hash": hash(question) % (2**31),
+        "question_hash": stable_hash,
         "question_preview": question[:200],
         "topic": topic,
         "easiness_factor": new_ef,
