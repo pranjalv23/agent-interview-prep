@@ -17,8 +17,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from agent_sdk.logging import configure_logging
-from agent_sdk.context import request_id_var, user_id_var
+from agent_sdk.middleware.infra import RequestIDMiddleware, SecurityHeadersMiddleware, VerifyInternalKeyMiddleware
 from agent_sdk.utils.env import validate_required_env_vars
+from agent_sdk.utils.validation import SAFE_SESSION_RE
 from agent_sdk.server.error_handlers import register_error_handlers
 from agent_sdk.metrics import metrics_response
 from agent_sdk.server.streaming import StreamingMathFixer, _fix_math_delimiters
@@ -96,36 +97,9 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Internal-API-Key", "X-User-Id", "X-Request-ID"],
 )
-
-_PUBLIC_PATHS = {"/health", "/metrics", "/docs", "/openapi.json", "/a2a/.well-known/agent.json"}
-
-@app.middleware("http")
-async def inject_request_id(request: Request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
-    tok_r = request_id_var.set(request_id)
-    tok_u = user_id_var.set(request.headers.get("X-User-Id"))
-    response = await call_next(request)
-    request_id_var.reset(tok_r)
-    user_id_var.reset(tok_u)
-    response.headers["X-Request-ID"] = request_id
-    return response
-
-@app.middleware("http")
-async def verify_internal_key(request: Request, call_next):
-    if request.url.path not in _PUBLIC_PATHS:
-        expected = os.getenv("INTERNAL_API_KEY")
-        if expected and request.headers.get("X-Internal-API-Key") != expected:
-            return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Unauthorized internal access"})
-    return await call_next(request)
-
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    return response
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(VerifyInternalKeyMiddleware)
 
 # Mount the A2A server as a sub-application
 a2a_app = create_a2a_app()
@@ -385,7 +359,7 @@ class SessionsHistoryRequest(BaseModel):
 @limiter.limit("30/minute")
 async def get_history_by_sessions(request: Request, body: SessionsHistoryRequest):
     user_id = request.headers.get("X-User-Id") or None
-    safe_ids = [s for s in body.session_ids[:20] if isinstance(s, str) and re.match(r'^[a-zA-Z0-9\-]{1,64}$', s)]
+    safe_ids = [s for s in body.session_ids[:20] if isinstance(s, str) and SAFE_SESSION_RE.match(s)]
     logger.info("POST /history/sessions — %d session(s)", len(safe_ids))
     history = await MongoDB.get_history_by_sessions(safe_ids, user_id=user_id)
     return {"history": history}
