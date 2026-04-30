@@ -2,6 +2,7 @@ from agent_sdk.secrets.akv import load_akv_secrets
 load_akv_secrets()
 
 import asyncio
+from datetime import datetime
 import json
 import logging
 import os
